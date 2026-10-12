@@ -1,0 +1,157 @@
+﻿@{
+    ViewData["Title"] = "AI Streaming Chat";
+}
+
+<div class="container py-4">
+    <h2>AI Streaming Chat</h2>
+
+    <div id="chatOutput"
+         class="border rounded p-3 mb-3"
+         style="min-height:250px; white-space:pre-wrap;">
+        Your AI response will appear here...
+    </div>
+
+    <form id="chatForm">
+        <div class="mb-3">
+            <label for="message" class="form-label">
+                Ask a question
+            </label>
+
+            <textarea id="Message"
+                      class="form-control"
+                      rows="3"
+                      placeholder="Explain dependency injection in ASP.NET Core..."
+                      required></textarea>
+        </div>
+
+        <button id="sendButton"
+                type="submit"
+                class="btn btn-primary">
+            Send
+        </button>
+
+        <button id="stopButton"
+                type="button"
+                class="btn btn-secondary"
+                disabled>
+            Stop
+        </button>
+    </form>
+</div>
+
+<script>
+    const form = document.getElementById("chatForm");
+    const messageInput = document.getElementById("Message");
+    const output = document.getElementById("chatOutput");
+    const sendButton = document.getElementById("sendButton");
+    const stopButton = document.getElementById("stopButton");
+
+    let activeController = null;
+
+    form.addEventListener("submit", async function (event) {
+        event.preventDefault();
+
+        const message = messageInput.value.trim();
+
+        if (!message || activeController) {
+            return;
+        }
+
+        output.textContent = "";
+        sendButton.disabled = true;
+        stopButton.disabled = false;
+
+        activeController = new AbortController();
+
+        try {
+            const response = await fetch("/ChatMVC/Stream", {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/json"
+                },
+                body: JSON.stringify({
+                    userId: "user001",
+                    message: message
+                }),
+                signal: activeController.signal
+            });
+
+            if (!response.ok) {
+                throw new Error("Request failed: " + response.status);
+            }
+
+            if (!response.body) {
+                throw new Error("Streaming is not supported by this response.");
+            }
+
+            const reader = response.body.getReader();
+            const decoder = new TextDecoder();
+            let buffer = "";
+            let completed = false;
+
+            while (!completed) {
+                const { value, done } = await reader.read();
+
+                if (done) {
+                    break;
+                }
+
+                buffer += decoder.decode(value, { stream: true });
+
+                const events = buffer.split("\n\n");
+                buffer = events.pop() ?? "";
+
+                for (const eventText of events) {
+                    for (const line of eventText.split("\n")) {
+                        if (!line.startsWith("data:")) {
+                            continue;
+                        }
+
+                        const data = line.slice(5).trimStart();
+
+                        if (data === "[DONE]") {
+                            completed = true;
+                            break;
+                        }
+
+                        // Each server chunk was JSON-serialized.
+                        output.textContent += JSON.parse(data);
+                    }
+
+                    if (completed) {
+                        break;
+                    }
+                }
+            }
+
+            buffer += decoder.decode();
+
+            // Process any final event left in the buffer.
+            for (const line of buffer.split("\n")) {
+                if (!line.startsWith("data:")) continue;
+
+                const data = line.slice(5).trimStart();
+
+                if (data === "[DONE]") break;
+
+                output.textContent += JSON.parse(data);
+            }
+        }
+        catch (error) {
+            if (error.name === "AbortError") {
+                output.textContent += "\n\n[Generation stopped]";
+            } else {
+                output.textContent += "\n\nError: " + error.message;
+            }
+        }
+        finally {
+            activeController = null;
+            sendButton.disabled = false;
+            stopButton.disabled = true;
+        }
+    });
+
+    stopButton.addEventListener("click", function () {
+        activeController?.abort();
+    });
+</script>
